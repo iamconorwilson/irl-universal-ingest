@@ -1,0 +1,68 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    wget \
+    git \
+    ffmpeg \
+    ca-certificates \
+    build-essential \
+    cmake \
+    pkg-config \
+    libssl-dev \
+    zlib1g-dev \
+    meson \
+    ninja-build \
+    libcjson-dev \
+    tcl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build and install irlserver/srt (belabox branch)
+RUN git clone --depth 1 -b belabox https://github.com/irlserver/srt.git /tmp/srt && \
+    cd /tmp/srt && \
+    ./configure --prefix=/usr/local && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    rm -rf /tmp/srt
+
+# Build and install irlserver/irl-srt-server
+RUN git clone --depth 1 https://github.com/irlserver/irl-srt-server.git /tmp/irl-srt-server && \
+    cd /tmp/irl-srt-server && \
+    git submodule update --init && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j$(nproc) && \
+    cp build/bin/* /usr/local/bin/ && \
+    rm -rf /tmp/irl-srt-server
+
+# Build and install BELABOX srtla (srtla_rec)
+RUN git clone --depth 1 https://github.com/BELABOX/srtla.git /tmp/srtla && \
+    cd /tmp/srtla && \
+    make -j$(nproc) && \
+    cp srtla_rec /usr/local/bin/ && \
+    rm -rf /tmp/srtla
+
+# Build and install VideoLAN librist (ristreceiver)
+RUN git clone --depth 1 https://code.videolan.org/rist/librist.git /tmp/librist && \
+    cd /tmp/librist && \
+    meson setup build --prefix=/usr/local -Dbuilt_tools=true && \
+    ninja -C build install && \
+    ldconfig && \
+    rm -rf /tmp/librist
+
+# Install Go 1.24
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://go.dev/dl/go1.24.0.linux-${ARCH}.tar.gz" -o go.tar.gz && \
+    tar -C /usr/local -xzf go.tar.gz && \
+    rm go.tar.gz
+
+WORKDIR /app
+COPY . .
+RUN go mod tidy
+
+EXPOSE 1935 8080 8890/udp 5000/udp 5001/udp 5002/udp 8888/udp
+
+CMD ["go", "run", "./cmd/server"]

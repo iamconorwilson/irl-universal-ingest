@@ -1,0 +1,19 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    volumes:
+      - .:/app
+    ports:
+      - "1935:1935"
+      - "8080:8080"
+      - "8890:8890/udp"
+      - "5000:5000/udp"
+      - "5001-5002:5001-5002/udp"
+      - "8888:8888/udp"
+    environment:
+      - GOCACHE=/root/.cache/go-build
+      - GOPATH=/go
+    stdin_open: true
+    tty: true

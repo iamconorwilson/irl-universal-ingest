@@ -7,12 +7,19 @@
 *.dll
 *.so
 *.dylib
+irl-ingest
+irl-universal-ingest
+bin/
+dist/
 
 # Test binary, built with `go test -c`
 *.test
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+
+# Logs
+*.log
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
@@ -23,3 +30,14 @@ go.work.sum
 
 # env file
 .env
+.env.*
+!.env.example
+
+# OS / Editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+
