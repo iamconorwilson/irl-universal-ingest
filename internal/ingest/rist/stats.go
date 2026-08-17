@@ -30,11 +30,10 @@ func ParseLogLine(line string) StatsMetric {
 	var m StatsMetric
 	lower := strings.ToLower(line)
 
-	if strings.Contains(lower, "connected") || strings.Contains(lower, "peer added") {
-		m.Connected = true
-	}
 	if strings.Contains(lower, "disconnected") || strings.Contains(lower, "peer removed") || strings.Contains(lower, "connection closed") {
 		m.Disconnected = true
+	} else if strings.Contains(lower, "connected") || strings.Contains(lower, "peer added") {
+		m.Connected = true
 	}
 
 	if match := cnameRegex.FindStringSubmatch(line); len(match) > 1 {

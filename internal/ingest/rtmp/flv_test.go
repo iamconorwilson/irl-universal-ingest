@@ -58,3 +58,51 @@ func TestEncodeVideoToFLV(t *testing.T) {
 		t.Errorf("expected header byte 0x17, got 0x%x", payload[0])
 	}
 }
+
+func TestEncodeVideoExCodedFrames(t *testing.T) {
+	msg := &message.VideoExCodedFrames{
+		FourCC:   message.FourCCHEVC,
+		DTS:      2000 * time.Millisecond,
+		PTSDelta: 50 * time.Millisecond,
+		Payload:  []byte{0x01, 0x02, 0x03},
+	}
+
+	payload, ts, err := EncodeVideoExCodedFrames(msg)
+	if err != nil {
+		t.Fatalf("unexpected error encoding VideoEx: %v", err)
+	}
+
+	if ts != 2000 {
+		t.Errorf("expected timestamp 2000, got %d", ts)
+	}
+
+	if len(payload) < 8 {
+		t.Fatalf("expected at least 8 bytes, got %d", len(payload))
+	}
+
+	if payload[0] != (0b10000000 | byte(message.VideoExTypeCodedFrames)) {
+		t.Errorf("unexpected packet type byte: 0x%x", payload[0])
+	}
+}
+
+func TestEncodeAudioExCodedFrames(t *testing.T) {
+	msg := &message.AudioExCodedFrames{
+		FourCC:  message.FourCCMP4A,
+		DTS:     1000 * time.Millisecond,
+		Payload: []byte{0xAA, 0xBB},
+	}
+
+	payload, ts, err := EncodeAudioExCodedFrames(msg)
+	if err != nil {
+		t.Fatalf("unexpected error encoding AudioEx: %v", err)
+	}
+
+	if ts != 1000 {
+		t.Errorf("expected timestamp 1000, got %d", ts)
+	}
+
+	if len(payload) != 5+len(msg.Payload) {
+		t.Fatalf("expected %d bytes, got %d", 5+len(msg.Payload), len(payload))
+	}
+}
+

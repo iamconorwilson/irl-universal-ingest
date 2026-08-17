@@ -85,9 +85,10 @@ func marshalMP4(box mp4.IImmutableBox) ([]byte, error) {
 }
 
 // writeFourCC writes a 32-bit FourCC code in big-endian order to dst.
-func writeFourCC(dst []byte, fourCC uint32) {
-	binary.BigEndian.PutUint32(dst, fourCC)
+func writeFourCC(dst []byte, fourCC message.FourCC) {
+	binary.BigEndian.PutUint32(dst, uint32(fourCC))
 }
+
 
 // EncodeVideoToFLV serializes a standard Video message into FLV tag payload and timestamp.
 func EncodeVideoToFLV(v *message.Video) ([]byte, uint32, error) {
