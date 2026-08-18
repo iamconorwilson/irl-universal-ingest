@@ -8,12 +8,22 @@ import (
 	"log"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/bluenviron/gortmplib"
 	"github.com/bluenviron/gortmplib/pkg/message"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/auth"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
+)
+
+// rtmpReadIdleTimeout bounds how long a half-open connection can block streamToRelay's read.
+const rtmpReadIdleTimeout = 60 * time.Second
+
+// acceptErrorBaseDelay/acceptErrorMaxDelay bound backoff so a persistent accept error can't spin the CPU.
+const (
+	acceptErrorBaseDelay = 10 * time.Millisecond
+	acceptErrorMaxDelay  = 1 * time.Second
 )
 
 // Server implements an RTMP ingest listener wrapping gortmplib.
@@ -61,6 +71,8 @@ func (s *Server) Start() error {
 func (s *Server) acceptLoop() {
 	defer s.wg.Done()
 
+	var consecutiveErrors int
+
 	for {
 		conn, err := s.listener.Accept()
 		if err != nil {
@@ -68,10 +80,25 @@ func (s *Server) acceptLoop() {
 			case <-s.ctx.Done():
 				return
 			default:
-				log.Printf("[rtmp] accept error: %v", err)
-				continue
 			}
+
+			log.Printf("[rtmp] accept error: %v", err)
+
+			delay := acceptErrorBaseDelay << consecutiveErrors
+			if delay > acceptErrorMaxDelay || delay <= 0 {
+				delay = acceptErrorMaxDelay
+			}
+			consecutiveErrors++
+
+			select {
+			case <-time.After(delay):
+			case <-s.ctx.Done():
+				return
+			}
+			continue
 		}
+
+		consecutiveErrors = 0
 
 		s.wg.Add(1)
 		go func(c net.Conn) {
@@ -120,13 +147,12 @@ func (s *Server) handleConn(nc net.Conn) {
 
 	log.Printf("[rtmp] acquired active ingest slot for path %q from %s", streamPath, nc.RemoteAddr())
 
-	// 3. Start relay session
+	// 3. Start relay session (teardown happens via release() above, so no explicit stop here)
 	writer, err := s.relay.StartSession("", streamPath)
 	if err != nil {
 		log.Printf("[rtmp] failed to start relay session: %v", err)
 		return
 	}
-	defer s.relay.StopSession()
 
 	if err := WriteFLVHeader(writer); err != nil {
 		log.Printf("[rtmp] failed to write FLV header: %v", err)
@@ -134,13 +160,33 @@ func (s *Server) handleConn(nc net.Conn) {
 	}
 
 	// Stream packets from RTMP connection to the relay
-	s.streamToRelay(sconn, writer)
+	s.streamToRelay(nc, sconn, writer)
 	log.Printf("[rtmp] session closed for path %q", streamPath)
 }
 
 // streamToRelay reads RTMP messages and writes them as FLV tags into the output writer.
-func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
+func (s *Server) streamToRelay(nc net.Conn, sconn *gortmplib.ServerConn, w io.Writer) {
 	hasReceivedKeyFrame := false
+
+	// Batch to at most once per second; per-message Touch/AddBytes calls are needless mutex churn.
+	var pendingBytes uint64
+	lastFlush := time.Now()
+	flushIfDue := func() {
+		if time.Since(lastFlush) < time.Second {
+			return
+		}
+		if pendingBytes > 0 {
+			s.manager.AddBytes(pendingBytes)
+			pendingBytes = 0
+		}
+		s.manager.Touch()
+		lastFlush = time.Now()
+	}
+	defer func() {
+		if pendingBytes > 0 {
+			s.manager.AddBytes(pendingBytes)
+		}
+	}()
 
 	for {
 		select {
@@ -149,21 +195,27 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		default:
 		}
 
+		if err := nc.SetReadDeadline(time.Now().Add(rtmpReadIdleTimeout)); err != nil {
+			log.Printf("[rtmp] failed to set read deadline: %v", err)
+		}
+
 		msg, err := sconn.Read()
 		if err != nil {
-			if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+			if ne, ok := err.(net.Error); ok && ne.Timeout() {
+				log.Printf("[rtmp] connection idle for %s, closing", rtmpReadIdleTimeout)
+			} else if !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
 				log.Printf("[rtmp] read error: %v", err)
 			}
 			return
 		}
 
-		s.manager.Touch()
+		flushIfDue()
 
 		switch m := msg.(type) {
 		case *message.Video:
 			payload, ts, err := EncodeVideoToFLV(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 
 				if m.Type == message.VideoTypeAU {
 					if !hasReceivedKeyFrame {
@@ -184,7 +236,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		case *message.VideoExSequenceStart:
 			payload, ts, err := EncodeVideoExSequenceStart(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 				if err := WriteFLVTag(w, TagTypeVideo, ts, payload); err != nil {
 					log.Printf("[rtmp] write video ex sequence tag error: %v", err)
 					return
@@ -195,7 +247,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 			hasReceivedKeyFrame = true
 			payload, ts, err := EncodeVideoExCodedFrames(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 				if err := WriteFLVTag(w, TagTypeVideo, ts, payload); err != nil {
 					log.Printf("[rtmp] write video ex frames tag error: %v", err)
 					return
@@ -205,7 +257,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		case *message.Audio:
 			payload, ts, err := EncodeAudioToFLV(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 
 				if !hasReceivedKeyFrame && m.AACType != message.AudioAACTypeConfig {
 					continue
@@ -220,7 +272,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		case *message.AudioExSequenceStart:
 			payload, ts, err := EncodeAudioExSequenceStart(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 				if err := WriteFLVTag(w, TagTypeAudio, ts, payload); err != nil {
 					log.Printf("[rtmp] write audio ex sequence tag error: %v", err)
 					return
@@ -230,7 +282,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		case *message.AudioExCodedFrames:
 			payload, ts, err := EncodeAudioExCodedFrames(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 				if !hasReceivedKeyFrame {
 					continue
 				}
@@ -243,7 +295,7 @@ func (s *Server) streamToRelay(sconn *gortmplib.ServerConn, w io.Writer) {
 		case *message.DataAMF0:
 			payload, ts, err := EncodeDataAMF0ToFLV(m)
 			if err == nil {
-				s.manager.AddBytes(uint64(len(payload)))
+				pendingBytes += uint64(len(payload))
 				if err := WriteFLVTag(w, TagTypeScript, ts, payload); err != nil {
 					log.Printf("[rtmp] write metadata tag error: %v", err)
 					return

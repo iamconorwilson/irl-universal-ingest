@@ -21,7 +21,7 @@ func TestCollectorFormatting(t *testing.T) {
 	if len(inactiveStats) != 2 {
 		t.Fatalf("expected 2 path entries, got %d", len(inactiveStats))
 	}
-	if inactiveStats[0].Active || inactiveStats[0].RTT != false || inactiveStats[0].Bitrate != 0 {
+	if inactiveStats[0].Active || inactiveStats[0].RTT != nil || inactiveStats[0].Bitrate != 0 {
 		t.Errorf("unexpected inactive stats: %+v", inactiveStats[0])
 	}
 

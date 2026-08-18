@@ -46,6 +46,38 @@ func TestParseStatsSLSResponse(t *testing.T) {
 	}
 }
 
+func TestParseStatsExactMatchNotSubstring(t *testing.T) {
+	// Must not match via substring containment against a longer publisher path.
+	rawJSON := `{
+		"publishers": {
+			"publish/live/stream2": {"bitrate": 3000, "rtt": 10}
+		}
+	}`
+
+	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if metric.Found {
+		t.Errorf("expected no match for /live/stream against publisher /live/stream2, got Found=true")
+	}
+	if metric.BitrateKbps != 0 {
+		t.Errorf("expected no bitrate to be attributed to the wrong stream, got %d", metric.BitrateKbps)
+	}
+}
+
+func TestParseStatsNotFoundWhenAbsent(t *testing.T) {
+	rawJSON := `{"publishers": {}}`
+
+	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if metric.Found {
+		t.Errorf("expected Found=false when no publishers are present")
+	}
+}
+
 func TestExtractStreamPath(t *testing.T) {
 	cases := []struct {
 		input    string

@@ -81,6 +81,46 @@ func TestManagerBitrateCalculation(t *testing.T) {
 	}
 }
 
+func TestManagerReleaseBlocksAcquireUntilCallbackCompletes(t *testing.T) {
+	// A slow onSlotRelease callback must block TryAcquire until it completes.
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+
+	mgr := NewManager(5*time.Second, func(proto, path string) {
+		close(callbackStarted)
+		<-releaseCallback
+	})
+
+	_, release := mgr.TryAcquire("rtmp", "/live")
+
+	go release()
+	<-callbackStarted
+
+	acquireResult := make(chan bool, 1)
+	go func() {
+		acquired, _ := mgr.TryAcquire("srt", "/live")
+		acquireResult <- acquired
+	}()
+
+	select {
+	case <-acquireResult:
+		t.Fatalf("expected TryAcquire to block while the release callback is still running")
+	case <-time.After(100 * time.Millisecond):
+		// expected: still blocked
+	}
+
+	close(releaseCallback)
+
+	select {
+	case acquired := <-acquireResult:
+		if !acquired {
+			t.Fatalf("expected TryAcquire to succeed once the release callback completed")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for TryAcquire to unblock")
+	}
+}
+
 func TestManagerSetBitrate(t *testing.T) {
 	mgr := NewManager(5*time.Second, nil)
 	acquired, release := mgr.TryAcquire("srt", "/live")

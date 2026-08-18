@@ -1,15 +1,21 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log"
-	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+)
+
+// restartBaseDelay and restartMaxDelay bound the backoff for auto-restarting ffmpeg after an unexpected exit.
+const (
+	restartBaseDelay = 500 * time.Millisecond
+	restartMaxDelay  = 30 * time.Second
 )
 
 // Relay manages the FFmpeg child process remuxing incoming streams to MPEG-TS UDP.
@@ -21,6 +27,13 @@ type Relay struct {
 	done          chan struct{}
 	currentURL    string
 	running       bool
+
+	// sessionID guards against a pending restart clobbering a session that has since superseded it.
+	sessionID uint64
+	stopped   bool
+	lastInput string
+	lastPath  string
+	attempt   int
 }
 
 // New creates a new Relay instance with the specified base UDP output URL.
@@ -30,14 +43,13 @@ func New(outputBaseURL string) *Relay {
 	}
 }
 
-// BuildOutputURL constructs the target UDP URL with the streamid and low-latency packet settings.
+// BuildOutputURL constructs the target UDP URL with low-latency packet settings.
 func (r *Relay) BuildOutputURL(path string) string {
 	sep := "?"
 	if strings.Contains(r.outputBaseURL, "?") {
 		sep = "&"
 	}
-	baseWithParams := fmt.Sprintf("%s%spkt_size=1316&streamid=%s", r.outputBaseURL, sep, url.QueryEscape(path))
-	return baseWithParams
+	return fmt.Sprintf("%s%spkt_size=1316", r.outputBaseURL, sep)
 }
 
 // StartSession launches an FFmpeg process configured for low-latency stream copying.
@@ -51,6 +63,16 @@ func (r *Relay) StartSession(input, path string) (io.WriteCloser, error) {
 		r.stopUnlocked()
 	}
 
+	r.stopped = false
+	r.lastInput = input
+	r.lastPath = path
+	r.attempt = 0
+
+	return r.startLocked(input, path)
+}
+
+// startLocked spawns the ffmpeg process for the given input/path. Callers must hold r.mu.
+func (r *Relay) startLocked(input, path string) (io.WriteCloser, error) {
 	targetURL := r.BuildOutputURL(path)
 	r.currentURL = targetURL
 
@@ -108,31 +130,78 @@ func (r *Relay) StartSession(input, path string) (io.WriteCloser, error) {
 	}
 
 	done := make(chan struct{})
+	r.sessionID++
+	mySession := r.sessionID
 	r.cmd = cmd
 	r.done = done
 	r.stdinPipe = stdin
 	r.running = true
 
-	go func(c *exec.Cmd, d chan struct{}) {
-		err := c.Wait()
-		close(d)
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if r.cmd == c {
-			r.running = false
-			if err != nil && err.Error() != "signal: killed" && !strings.Contains(err.Error(), "killed") {
-				log.Printf("[relay] ffmpeg process exited: %v", err)
-			}
-		}
-	}(cmd, done)
+	go r.watch(cmd, done, mySession)
 
 	return stdin, nil
 }
 
-// StopSession terminates the active FFmpeg child process cleanly.
+// watch reaps ffmpeg on exit and schedules a restart unless it was a deliberate stop.
+func (r *Relay) watch(cmd *exec.Cmd, done chan struct{}, mySession uint64) {
+	err := cmd.Wait()
+	close(done)
+
+	r.mu.Lock()
+	stale := r.sessionID != mySession
+	if !stale {
+		r.running = false
+	}
+	stopped := r.stopped
+	input, path := r.lastInput, r.lastPath
+	r.mu.Unlock()
+
+	if stale || stopped {
+		return
+	}
+
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
+		log.Printf("[relay] ffmpeg wait error: %v", err)
+	} else if err != nil {
+		log.Printf("[relay] ffmpeg exited unexpectedly: %v", err)
+	}
+
+	r.scheduleRestart(mySession, input, path)
+}
+
+// scheduleRestart backs off, then restarts ffmpeg unless the session was stopped or superseded meanwhile.
+func (r *Relay) scheduleRestart(mySession uint64, input, path string) {
+	r.mu.Lock()
+	attempt := r.attempt
+	r.attempt++
+	r.mu.Unlock()
+
+	delay := restartBaseDelay << attempt
+	if delay > restartMaxDelay || delay <= 0 {
+		delay = restartMaxDelay
+	}
+
+	log.Printf("[relay] restarting ffmpeg in %s (attempt %d)", delay, attempt+1)
+	time.Sleep(delay)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.stopped || r.sessionID != mySession {
+		return
+	}
+
+	if _, err := r.startLocked(input, path); err != nil {
+		log.Printf("[relay] ffmpeg restart failed: %v", err)
+	}
+}
+
+// StopSession terminates the active FFmpeg process and disables auto-restart for it.
 func (r *Relay) StopSession() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.stopped = true
 	r.stopUnlocked()
 }
 
@@ -146,6 +215,8 @@ func (r *Relay) stopUnlocked() {
 	if r.cmd != nil {
 		done := r.done
 		cmd := r.cmd
+		r.cmd = nil
+		r.done = nil
 		select {
 		case <-done:
 		case <-time.After(300 * time.Millisecond):
@@ -154,8 +225,6 @@ func (r *Relay) stopUnlocked() {
 			}
 			<-done
 		}
-		r.cmd = nil
-		r.done = nil
 	}
 
 	r.running = false

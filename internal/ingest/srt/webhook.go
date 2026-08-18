@@ -17,14 +17,14 @@ import (
 
 // WebhookHandler processes lifecycle callbacks emitted by irl-srt-server.
 type WebhookHandler struct {
-	mu              sync.Mutex
-	manager         *arbitration.Manager
-	relay           *relay.Relay
-	allowedPaths    []string
-	playerPort      int
-	srtlaPort       int
-	activeSlot      func()
-	lastPushedBytes uint64
+	mu           sync.Mutex
+	manager      *arbitration.Manager
+	relay        *relay.Relay
+	allowedPaths []string
+	playerPort   int
+	srtlaPort    int
+	activeSlot   func()
+	activePath   string
 }
 
 // NewWebhookHandler creates an HTTP handler for SLS lifecycle events.
@@ -148,6 +148,7 @@ func (h *WebhookHandler) handleConnect(w http.ResponseWriter, protocol, streamPa
 	}
 
 	h.activeSlot = release
+	h.activePath = streamPath
 
 	// 3. Start relay pulling from local SLS player port with zero loopback buffering
 	playerInputURL := fmt.Sprintf("srt://127.0.0.1:%d?streamid=play%s&latency=20", h.playerPort, streamPath)
@@ -155,6 +156,7 @@ func (h *WebhookHandler) handleConnect(w http.ResponseWriter, protocol, streamPa
 		log.Printf("[%s] failed to start relay session: %v", strings.ToLower(protocol), err)
 		release()
 		h.activeSlot = nil
+		h.activePath = ""
 		http.Error(w, "failed to start relay", http.StatusInternalServerError)
 		return
 	}
@@ -163,14 +165,15 @@ func (h *WebhookHandler) handleConnect(w http.ResponseWriter, protocol, streamPa
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleClose releases the arbitration slot and stops the active relay session.
+// handleClose releases the slot only if the event refers to the currently active stream path.
 func (h *WebhookHandler) handleClose(w http.ResponseWriter, streamPath string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.activeSlot != nil {
+	if h.activeSlot != nil && h.activePath == streamPath {
 		h.activeSlot()
 		h.activeSlot = nil
+		h.activePath = ""
 		h.relay.StopSession()
 		log.Printf("[srt] stream closed and slot released for %q", streamPath)
 	}
@@ -178,7 +181,7 @@ func (h *WebhookHandler) handleClose(w http.ResponseWriter, streamPath string) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleStatsPush processes stat_post_url HTTP pushes from SLS.
+// handleStatsPush processes stat_post_url pushes from SLS, keying liveness off publisher presence.
 func (h *WebhookHandler) handleStatsPush(w http.ResponseWriter, bodyBytes []byte) {
 	if len(bodyBytes) == 0 {
 		w.WriteHeader(http.StatusOK)
@@ -195,18 +198,12 @@ func (h *WebhookHandler) handleStatsPush(w http.ResponseWriter, bodyBytes []byte
 	}
 
 	metric, err := ParseStats(bodyBytes, slot.Path)
-	if err == nil {
+	if err == nil && metric.Found {
 		if metric.RTTMs > 0 {
 			h.manager.SetRTT(metric.RTTMs)
 		}
 		if metric.BitrateKbps > 0 {
 			h.manager.SetBitrate(metric.BitrateKbps)
-		}
-		if metric.Bytes > 0 {
-			if metric.Bytes > h.lastPushedBytes && h.lastPushedBytes > 0 {
-				h.manager.AddBytes(metric.Bytes - h.lastPushedBytes)
-			}
-			h.lastPushedBytes = metric.Bytes
 		}
 		h.manager.Touch()
 	}

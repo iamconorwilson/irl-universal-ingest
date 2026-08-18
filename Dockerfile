@@ -1,12 +1,16 @@
+FROM golang:1.25-bookworm AS builder
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/irl-ingest ./cmd/server
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    wget \
-    git \
     ffmpeg \
     ca-certificates \
     build-essential \
@@ -18,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     libcjson-dev \
     tcl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Build and install irlserver/srt (belabox branch)
@@ -55,16 +60,14 @@ RUN git clone --depth 1 https://code.videolan.org/rist/librist.git /tmp/librist 
     ldconfig && \
     rm -rf /tmp/librist
 
-# Install Go 1.25
-RUN ARCH=$(dpkg --print-architecture) && \
-    curl -fsSL "https://go.dev/dl/go1.25.0.linux-${ARCH}.tar.gz" -o go.tar.gz && \
-    tar -C /usr/local -xzf go.tar.gz && \
-    rm go.tar.gz
+# Toolchain and sources are no longer needed at runtime.
+RUN apt-get purge -y build-essential cmake pkg-config libssl-dev zlib1g-dev meson ninja-build tcl git && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY . .
-RUN go mod tidy
+COPY --from=builder /out/irl-ingest /usr/local/bin/irl-ingest
 
 EXPOSE 1935 8080 8890/udp 5000/udp 5001/udp 8888/udp
 
-CMD ["go", "run", "./cmd/server"]
+ENTRYPOINT ["/usr/local/bin/irl-ingest"]
+CMD ["-config", "/app/config.yaml"]

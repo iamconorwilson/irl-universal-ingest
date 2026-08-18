@@ -13,7 +13,7 @@ type SlotInfo struct {
 	StartedAt   time.Time
 	LastSeen    time.Time
 	BitrateKbps int64
-	RTT         any
+	RTT         *float64
 }
 
 // Manager controls single-source arbitration across all ingest protocols.
@@ -25,11 +25,17 @@ type Manager struct {
 	onSlotRelease func(protocol, path string)
 
 	// Bitrate tracking
-	lastBytesCheck time.Time
-	bytesInPeriod  uint64
+	lastBytesCheck    time.Time
+	bytesInPeriod     uint64
+	lastBitrateUpdate time.Time
+	decayStop         chan struct{}
 }
 
+// bitrateDecayThreshold bounds how long a stalled stream can report its last healthy bitrate.
+const bitrateDecayThreshold = 2 * time.Second
+
 // NewManager creates an arbitration manager with the specified silence timeout.
+// onSlotRelease runs synchronously under the manager's lock, so the callback must not call back into the Manager.
 func NewManager(sourceTimeout time.Duration, onSlotRelease func(protocol, path string)) *Manager {
 	return &Manager{
 		sourceTimeout: sourceTimeout,
@@ -55,17 +61,22 @@ func (m *Manager) TryAcquire(protocol, path string) (bool, func()) {
 		StartedAt:   now,
 		LastSeen:    now,
 		BitrateKbps: 0,
-		RTT:         false,
+		RTT:         nil,
 	}
 	m.activeSlot = slot
 	m.lastBytesCheck = now
 	m.bytesInPeriod = 0
+	m.lastBitrateUpdate = now
 
 	if m.sourceTimeout > 0 {
 		m.timer = time.AfterFunc(m.sourceTimeout, func() {
 			m.handleTimeout(upperProto, path)
 		})
 	}
+
+	decayStop := make(chan struct{})
+	m.decayStop = decayStop
+	go m.decayLoop(decayStop)
 
 	var once sync.Once
 	release := func() {
@@ -109,21 +120,22 @@ func (m *Manager) AddBytes(n uint64) {
 		bits := float64(m.bytesInPeriod * 8)
 		seconds := elapsed.Seconds()
 		m.activeSlot.BitrateKbps = int64(bits / (1000.0 * seconds))
+		m.lastBitrateUpdate = now
 
 		m.bytesInPeriod = 0
 		m.lastBytesCheck = now
 	}
 }
 
-// SetRTT updates the current round-trip time metric for protocols that provide it.
-func (m *Manager) SetRTT(rtt any) {
+// SetRTT updates the current round-trip time metric in milliseconds.
+func (m *Manager) SetRTT(rttMs float64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.activeSlot == nil {
 		return
 	}
-	m.activeSlot.RTT = rtt
+	m.activeSlot.RTT = &rttMs
 }
 
 // SetBitrate directly sets the current bitrate in Kbps.
@@ -135,6 +147,7 @@ func (m *Manager) SetBitrate(kbps int64) {
 		return
 	}
 	m.activeSlot.BitrateKbps = kbps
+	m.lastBitrateUpdate = time.Now()
 }
 
 // ActiveInfo returns snapshot information about the currently active slot.
@@ -163,10 +176,38 @@ func (m *Manager) releaseSlot(protocol, path string) {
 			m.timer.Stop()
 			m.timer = nil
 		}
+		if m.decayStop != nil {
+			close(m.decayStop)
+			m.decayStop = nil
+		}
 		m.activeSlot = nil
 
+		// Held lock blocks concurrent TryAcquire until this release's teardown completes.
 		if m.onSlotRelease != nil {
-			go m.onSlotRelease(upperProto, path)
+			m.onSlotRelease(upperProto, path)
+		}
+	}
+}
+
+// decayLoop zeroes a stalled slot's bitrate instead of leaving a stale reading in place.
+func (m *Manager) decayLoop(stop <-chan struct{}) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			m.mu.Lock()
+			if m.activeSlot == nil {
+				m.mu.Unlock()
+				return
+			}
+			if m.activeSlot.BitrateKbps != 0 && time.Since(m.lastBitrateUpdate) >= bitrateDecayThreshold {
+				m.activeSlot.BitrateKbps = 0
+			}
+			m.mu.Unlock()
 		}
 	}
 }

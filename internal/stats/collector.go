@@ -5,17 +5,18 @@ import (
 	"time"
 
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/auth"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
 )
 
 // PathStat represents the metrics and status for an individual ingest path.
 type PathStat struct {
-	Path     string `json:"path"`
-	Active   bool   `json:"active"`
-	Protocol string `json:"protocol"`
-	Uptime   int64  `json:"uptime"`
-	Bitrate  int64  `json:"bitrate"`
-	RTT      any    `json:"RTT"`
+	Path     string   `json:"path"`
+	Active   bool     `json:"active"`
+	Protocol string   `json:"protocol"`
+	Uptime   int64    `json:"uptime"`
+	Bitrate  int64    `json:"bitrate"`
+	RTT      *float64 `json:"RTT"`
 }
 
 // Collector gathers path-level statistics from the arbitration manager and relay.
@@ -34,36 +35,42 @@ func NewCollector(mgr *arbitration.Manager, rel *relay.Relay, allowedPaths []str
 	}
 }
 
+// Healthy reports false when a slot is held but the relay isn't actually running.
+func (c *Collector) Healthy() bool {
+	_, active := c.manager.ActiveInfo()
+	return !active || c.relay.IsRunning()
+}
+
 // Collect returns an array of stats, one entry per configured or active path.
 func (c *Collector) Collect(_ context.Context) []PathStat {
 	slot, active := c.manager.ActiveInfo()
 	isRelayRunning := c.relay.IsRunning()
 
-	// Gather list of paths to report
+	// Normalize before de-duplicating so "/live/stream" and "/live/stream/" aren't both listed.
 	seenPaths := make(map[string]bool)
 	var paths []string
 
-	for _, p := range c.allowedPaths {
-		if !seenPaths[p] {
-			seenPaths[p] = true
-			paths = append(paths, p)
+	addPath := func(p string) {
+		norm := auth.NormalizePath(p)
+		if !seenPaths[norm] {
+			seenPaths[norm] = true
+			paths = append(paths, norm)
 		}
 	}
 
-	if active && !seenPaths[slot.Path] {
-		seenPaths[slot.Path] = true
-		paths = append(paths, slot.Path)
+	for _, p := range c.allowedPaths {
+		addPath(p)
+	}
+
+	if active {
+		addPath(slot.Path)
 	}
 
 	results := make([]PathStat, 0, len(paths))
 
 	for _, p := range paths {
-		if active && isRelayRunning && slot.Path == p {
+		if active && isRelayRunning && auth.NormalizePath(slot.Path) == p {
 			uptime := int64(time.Since(slot.StartedAt).Seconds())
-			rtt := slot.RTT
-			if rtt == nil {
-				rtt = false
-			}
 
 			results = append(results, PathStat{
 				Path:     p,
@@ -71,7 +78,7 @@ func (c *Collector) Collect(_ context.Context) []PathStat {
 				Protocol: slot.Protocol,
 				Uptime:   uptime,
 				Bitrate:  slot.BitrateKbps,
-				RTT:      rtt,
+				RTT:      slot.RTT,
 			})
 		} else {
 			results = append(results, PathStat{
@@ -80,7 +87,7 @@ func (c *Collector) Collect(_ context.Context) []PathStat {
 				Protocol: "",
 				Uptime:   0,
 				Bitrate:  0,
-				RTT:      false,
+				RTT:      nil,
 			})
 		}
 	}

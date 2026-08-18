@@ -2,6 +2,7 @@ package srt
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -96,4 +97,20 @@ func GenerateSLSConfig(opts SLSConfigOptions) string {
 	sb.WriteString("}\n")
 
 	return sb.String()
+}
+
+// BuildSRTLAArgs constructs the CLI arguments for the srtla_rec receiver proxy.
+func BuildSRTLAArgs(srtlaPort int, srtHost string, srtPort int, logLevel string) []string {
+	if logLevel == "" {
+		logLevel = "info"
+	}
+	if srtHost == "" {
+		srtHost = "127.0.0.1"
+	}
+	return []string{
+		"--srtla_port", strconv.Itoa(srtlaPort),
+		"--srt_hostname", srtHost,
+		"--srt_port", strconv.Itoa(srtPort),
+		"--log_level", logLevel,
+	}
 }

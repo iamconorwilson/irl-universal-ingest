@@ -125,7 +125,7 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=
 
 # Test SRT Ingest
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000:sample_rate=48000 \
-  -c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -f mpegts "srt://localhost:8890?streamid=#!::r=live/stream,m=publish"
+  -c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -f mpegts "srt://localhost:8890?streamid=publish/live/stream"
 
 # Test RIST Ingest
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000:sample_rate=48000 \
@@ -164,7 +164,9 @@ git clone --depth 1 https://github.com/irlserver/irl-srt-server.git /tmp/irl-srt
 
 # 3. srtla (srtla_rec)
 git clone --depth 1 https://github.com/irlserver/srtla.git /tmp/srtla && \
-  cd /tmp/srtla && make -j$(nproc) && sudo cp srtla_rec /usr/local/bin/
+  cd /tmp/srtla && git submodule update --init && \
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc) && \
+  sudo cp build/srtla_rec /usr/local/bin/
 
 # 4. VideoLAN librist (ristreceiver)
 git clone --depth 1 https://code.videolan.org/rist/librist.git /tmp/librist && \

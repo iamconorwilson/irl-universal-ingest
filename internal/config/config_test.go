@@ -86,3 +86,38 @@ auth:
 		t.Errorf("unexpected allowed paths: %v", cfg.Auth.AllowedPaths)
 	}
 }
+
+func TestValidatePassphraseTooShort(t *testing.T) {
+	cfg := Default()
+	cfg.SRT.Passphrase = "short"
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for short passphrase")
+	}
+}
+
+func TestValidatePassphraseEmptyIsAllowed(t *testing.T) {
+	cfg := Default()
+	cfg.SRT.Passphrase = ""
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unexpected validation error for empty passphrase: %v", err)
+	}
+}
+
+func TestValidatePortCollision(t *testing.T) {
+	cfg := Default()
+	cfg.SRT.HTTPPort = cfg.RTMP.Port
+
+	if err := cfg.Validate(); err == nil {
+		t.Fatalf("expected validation error for colliding ports")
+	}
+}
+
+func TestValidateDefaultsAreValid(t *testing.T) {
+	cfg := Default()
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected default config to be valid, got: %v", err)
+	}
+}

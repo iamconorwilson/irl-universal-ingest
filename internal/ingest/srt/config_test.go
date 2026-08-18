@@ -73,3 +73,23 @@ func TestGenerateSLSConfigDefaults(t *testing.T) {
 		t.Errorf("expected no srt_passphrase directive when unset, got:\n%s", conf)
 	}
 }
+
+func TestBuildSRTLAArgs(t *testing.T) {
+	args := BuildSRTLAArgs(5000, "127.0.0.1", 8891, "debug")
+	expected := []string{
+		"--srtla_port", "5000",
+		"--srt_hostname", "127.0.0.1",
+		"--srt_port", "8891",
+		"--log_level", "debug",
+	}
+
+	if len(args) != len(expected) {
+		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
+	}
+
+	for i, arg := range args {
+		if arg != expected[i] {
+			t.Errorf("arg[%d] expected %q, got %q", i, expected[i], arg)
+		}
+	}
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/config"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/health"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/ingest/rist"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/ingest/rtmp"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/ingest/srt"
@@ -32,6 +33,9 @@ func main() {
 
 	// Initialize FFmpeg relay
 	streamRelay := relay.New(cfg.Output.URL())
+
+	// Tracks component-level failures so /healthz reflects real health.
+	healthTracker := health.NewTracker()
 
 	// Initialize arbitration manager
 	arbitrationManager := arbitration.NewManager(cfg.SourceTimeout, func(protocol, path string) {
@@ -59,6 +63,7 @@ func main() {
 		AllowedPaths:   cfg.Auth.AllowedPaths,
 		Manager:        arbitrationManager,
 		Relay:          streamRelay,
+		Health:         healthTracker,
 	})
 	if err := srtServer.Start(); err != nil {
 		log.Fatalf("[main] failed to start SRT server: %v", err)
@@ -70,9 +75,11 @@ func main() {
 		BufferMs:     cfg.RIST.BufferMs,
 		Profile:      cfg.RIST.Profile,
 		Secret:       cfg.RIST.Secret,
+		LogLevel:     cfg.LogLevel,
 		AllowedPaths: cfg.Auth.AllowedPaths,
 		Manager:      arbitrationManager,
 		Relay:        streamRelay,
+		Health:       healthTracker,
 	})
 	if err := ristServer.Start(); err != nil {
 		log.Fatalf("[main] failed to start RIST server: %v", err)
@@ -80,7 +87,7 @@ func main() {
 
 	// Initialize stats endpoint
 	collector := stats.NewCollector(arbitrationManager, streamRelay, cfg.Auth.AllowedPaths)
-	statsServer := stats.NewServer(cfg.StatsPort, collector)
+	statsServer := stats.NewServer(cfg.StatsPort, collector, healthTracker)
 	if err := statsServer.Start(); err != nil {
 		log.Fatalf("[main] failed to start stats server: %v", err)
 	}

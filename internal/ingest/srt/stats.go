@@ -1,13 +1,9 @@
 package srt
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
-	"time"
 )
 
 // StreamMetric holds parsed metric information for an active SRT/SRTLA stream.
@@ -15,53 +11,8 @@ type StreamMetric struct {
 	StreamID    string  `json:"stream_id"`
 	BitrateKbps int64   `json:"bitrate_kbps"`
 	RTTMs       float64 `json:"rtt_ms"`
-	Bytes       uint64  `json:"bytes"`
-}
-
-// Client interacts with the internal SLS HTTP API.
-type Client struct {
-	httpClient *http.Client
-	statsURL   string
-}
-
-// NewClient creates an HTTP client for retrieving SLS internal metrics.
-func NewClient(statsURL string) *Client {
-	return &Client{
-		httpClient: &http.Client{
-			Timeout: 2 * time.Second,
-		},
-		statsURL: statsURL,
-	}
-}
-
-// FetchRaw retrieves the raw JSON body from the SLS stats HTTP endpoint.
-func (c *Client) FetchRaw(ctx context.Context) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.statsURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating stats request: %w", err)
-	}
-	req.Header.Set("Authorization", InternalAPIKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetching sls stats: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("sls stats returned status %d", resp.StatusCode)
-	}
-
-	return io.ReadAll(resp.Body)
-}
-
-// FetchMetrics queries the SLS /stats endpoint and extracts the metrics for the active stream.
-func (c *Client) FetchMetrics(ctx context.Context, targetStreamID string) (*StreamMetric, error) {
-	body, err := c.FetchRaw(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return ParseStats(body, targetStreamID)
+	// Found is the liveness signal: presence in the response, not a bitrate/RTT threshold.
+	Found bool `json:"-"`
 }
 
 // SLSStatsResponse represents the JSON payload from irl-srt-server /stats.
@@ -91,16 +42,22 @@ func ParseStats(data []byte, targetStreamID string) (*StreamMetric, error) {
 		StreamID: targetStreamID,
 	}
 
-	normalizedTarget := strings.TrimPrefix(targetStreamID, "/")
+	normalizedTarget := normalizePublisherKey(targetStreamID)
 	for key, pub := range resp.Publishers {
-		normalizedKey := strings.TrimPrefix(key, "publish/")
-		normalizedKey = strings.TrimPrefix(normalizedKey, "/")
-		if strings.Contains(normalizedKey, normalizedTarget) || len(resp.Publishers) == 1 {
+		if normalizePublisherKey(key) == normalizedTarget {
 			metric.BitrateKbps = pub.Bitrate
 			metric.RTTMs = pub.RTT
+			metric.Found = true
 			return metric, nil
 		}
 	}
 
 	return metric, nil
+}
+
+// normalizePublisherKey strips the SLS domain prefix so keys and paths can be compared exactly.
+func normalizePublisherKey(key string) string {
+	key = strings.TrimPrefix(key, "publish/")
+	key = strings.TrimPrefix(key, "/")
+	return key
 }

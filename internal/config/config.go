@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -116,6 +117,7 @@ func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			log.Printf("[config] warning: config file %q not found, using defaults", path)
 			return cfg, nil
 		}
 		return nil, fmt.Errorf("reading config file: %w", err)
@@ -125,5 +127,49 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parsing config yaml: %w", err)
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
 	return cfg, nil
+}
+
+// minPassphraseLen matches the SRT passphrase minimum documented in the README.
+const minPassphraseLen = 10
+
+// Validate catches config problems that would otherwise only surface as a confusing runtime failure.
+func (c *Config) Validate() error {
+	if c.SRT.Passphrase != "" && len(c.SRT.Passphrase) < minPassphraseLen {
+		return fmt.Errorf("srt.passphrase must be at least %d characters (got %d)", minPassphraseLen, len(c.SRT.Passphrase))
+	}
+
+	type portUse struct {
+		label string
+		port  int
+	}
+	uses := []portUse{
+		{"rtmp.port", c.RTMP.Port},
+		{"srt.port", c.SRT.Port},
+		{"srt.player_port", c.SRT.PlayerPort},
+		{"srt.http_port", c.SRT.HTTPPort},
+		{"srtla.port", c.SRTLA.Port},
+		{"rist.port", c.RIST.Port},
+		{"stats_port", c.StatsPort},
+	}
+	if c.Output.Host == "" || c.Output.Host == "127.0.0.1" || c.Output.Host == "localhost" {
+		uses = append(uses, portUse{"output.port", c.Output.Port})
+	}
+
+	seen := make(map[int]string, len(uses))
+	for _, u := range uses {
+		if u.port <= 0 {
+			continue
+		}
+		if other, exists := seen[u.port]; exists {
+			return fmt.Errorf("port %d is used by both %s and %s", u.port, other, u.label)
+		}
+		seen[u.port] = u.label
+	}
+
+	return nil
 }

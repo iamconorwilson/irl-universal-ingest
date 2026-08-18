@@ -14,6 +14,7 @@ import (
 
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/auth"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/health"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
 )
 
@@ -24,9 +25,11 @@ type ServerOptions struct {
 	BufferMs     int
 	Profile      string
 	Secret       string
+	LogLevel     string
 	AllowedPaths []string
 	Manager      *arbitration.Manager
 	Relay        *relay.Relay
+	Health       *health.Tracker
 }
 
 // Server supervises the ristreceiver process and manages RIST stream arbitration.
@@ -37,12 +40,28 @@ type Server struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
-	mu         sync.Mutex
-	activeSlot func()
-	activePath string
-	active     bool
-	lastCNAME  string
+
+	mu                sync.Mutex
+	activeSlot        func()
+	activePath        string
+	active            bool
+	lastCNAME         string
+	lastActivity      time.Time
+	stopping          bool
+	restartAttempt    int
+	lastForcedRestart time.Time
 }
+
+// activityFreshness bounds how long the watchdog stays alive after the last observed traffic line.
+const activityFreshness = 3 * time.Second
+
+// restartBaseDelay/restartMaxDelay bound backoff for both unexpected exits and forced restarts.
+const (
+	restartBaseDelay     = 500 * time.Millisecond
+	restartMaxDelay      = 30 * time.Second
+	minForcedRestartGap  = 1 * time.Second
+	scannerMaxTokenBytes = 1 << 20 // 1MB, well above default 64KB
+)
 
 // NewServer creates a new RIST server supervisor.
 func NewServer(opts ServerOptions) *Server {
@@ -77,6 +96,8 @@ func (s *Server) BuildArgs() []string {
 		profileCode = "1"
 	case "advanced", "2":
 		profileCode = "2"
+	default:
+		log.Printf("[rist] warning: unrecognized rist.profile %q, falling back to %q", s.opts.Profile, "main")
 	}
 
 	args := []string{
@@ -85,7 +106,7 @@ func (s *Server) BuildArgs() []string {
 		"-p", profileCode,
 		"-b", strconv.Itoa(s.opts.BufferMs),
 		"-S", "1000",
-		"-v", "4",
+		"-v", ristVerbosity(s.opts.LogLevel),
 	}
 
 	if s.opts.Secret != "" {
@@ -93,6 +114,38 @@ func (s *Server) BuildArgs() []string {
 	}
 
 	return args
+}
+
+// ristVerbosity maps the configured log level onto ristreceiver's -v verbosity scale.
+func ristVerbosity(logLevel string) string {
+	switch strings.ToLower(logLevel) {
+	case "debug":
+		return "4"
+	case "warn", "warning":
+		return "2"
+	case "error":
+		return "1"
+	default: // "info" and anything unrecognized
+		return "3"
+	}
+}
+
+// debugLogging reports whether raw ristreceiver output lines should be individually logged.
+func (s *Server) debugLogging() bool {
+	return strings.EqualFold(s.opts.LogLevel, "debug")
+}
+
+// setUnhealthy is a no-op if no health tracker was configured.
+func (s *Server) setUnhealthy(err error) {
+	if s.opts.Health != nil {
+		s.opts.Health.SetUnhealthy("ristreceiver", err.Error())
+	}
+}
+
+func (s *Server) clearUnhealthy() {
+	if s.opts.Health != nil {
+		s.opts.Health.ClearUnhealthy("ristreceiver")
+	}
 }
 
 // Start launches the ristreceiver child process and starts the stream heartbeat.
@@ -107,6 +160,7 @@ func (s *Server) Start() error {
 	s.binaryPath = bin
 	if err := s.startProcessLocked(bin); err != nil {
 		s.mu.Unlock()
+		s.setUnhealthy(err)
 		return err
 	}
 	s.mu.Unlock()
@@ -117,7 +171,7 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// heartbeatLoop periodically refreshes the arbitration slot watchdog while stream is actively running.
+// heartbeatLoop touches the watchdog only while recent traffic has actually been observed.
 func (s *Server) heartbeatLoop() {
 	defer s.wg.Done()
 
@@ -131,9 +185,10 @@ func (s *Server) heartbeatLoop() {
 		case <-ticker.C:
 			s.mu.Lock()
 			active := s.active
+			fresh := active && time.Since(s.lastActivity) <= activityFreshness
 			s.mu.Unlock()
 
-			if active && s.opts.Relay.IsRunning() {
+			if fresh && s.opts.Relay.IsRunning() {
 				s.opts.Manager.Touch()
 			}
 		}
@@ -160,11 +215,13 @@ func (s *Server) startProcessLocked(binaryPath string) error {
 	}
 
 	s.cmd = cmd
+	s.clearUnhealthy()
 	log.Printf("[rist] started ristreceiver daemon on port %d (PID %d, player port %d)", s.opts.RISTPort, cmd.Process.Pid, s.opts.PlayerPort)
 
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.monitorOutput(stdout)
 	go s.monitorOutput(stderr)
+	go s.reapProcess(cmd)
 
 	return nil
 }
@@ -174,10 +231,78 @@ func (s *Server) monitorOutput(r io.Reader) {
 	defer s.wg.Done()
 
 	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), scannerMaxTokenBytes)
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		log.Printf("[rist] %s", line)
+		if s.debugLogging() {
+			log.Printf("[rist] %s", line)
+		}
 		s.handleLogLine(line)
+	}
+
+	if err := scanner.Err(); err != nil {
+		log.Printf("[rist] output scan error: %v", err)
+	}
+}
+
+// reapProcess reaps ristreceiver on exit and schedules a restart unless it was a deliberate stop.
+func (s *Server) reapProcess(cmd *exec.Cmd) {
+	defer s.wg.Done()
+
+	err := cmd.Wait()
+
+	s.mu.Lock()
+	isCurrent := s.cmd == cmd
+	if isCurrent {
+		s.cmd = nil
+	}
+	stopping := s.stopping
+	binPath := s.binaryPath
+	s.mu.Unlock()
+
+	if !isCurrent || stopping {
+		return
+	}
+
+	if err != nil {
+		log.Printf("[rist] ristreceiver exited unexpectedly: %v", err)
+	} else {
+		log.Printf("[rist] ristreceiver exited")
+	}
+
+	select {
+	case <-s.ctx.Done():
+		return
+	default:
+	}
+
+	s.mu.Lock()
+	s.stopActiveStreamLocked()
+	attempt := s.restartAttempt
+	s.restartAttempt++
+	s.mu.Unlock()
+
+	delay := restartBaseDelay << attempt
+	if delay > restartMaxDelay || delay <= 0 {
+		delay = restartMaxDelay
+	}
+	log.Printf("[rist] restarting ristreceiver in %s (attempt %d)", delay, attempt+1)
+	time.Sleep(delay)
+
+	select {
+	case <-s.ctx.Done():
+		return
+	default:
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.stopping && binPath != "" {
+		if err := s.startProcessLocked(binPath); err != nil {
+			log.Printf("[rist] ristreceiver restart failed: %v", err)
+			s.setUnhealthy(err)
+		}
 	}
 }
 
@@ -205,6 +330,8 @@ func (s *Server) handleLogLine(line string) {
 func (s *Server) handleActivity(metric StatsMetric) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.lastActivity = time.Now()
 
 	streamPath := s.lastCNAME
 	if streamPath == "" {
@@ -250,7 +377,7 @@ func (s *Server) handleActivity(metric StatsMetric) {
 	s.opts.Manager.Touch()
 
 	if metric.RTTMs > 0 {
-		s.opts.Manager.SetRTT(metric.RTTMs)
+		s.opts.Manager.SetRTT(float64(metric.RTTMs))
 	}
 	if metric.BitrateKbps > 0 {
 		s.opts.Manager.SetBitrate(metric.BitrateKbps)
@@ -278,8 +405,13 @@ func (s *Server) stopActiveStreamLocked() {
 	}
 }
 
-// restartReceiverLocked kills and restarts the ristreceiver process to sever unauthorized connections.
+// restartReceiverLocked kills and restarts ristreceiver to sever an unauthorized connection.
 func (s *Server) restartReceiverLocked() {
+	if since := time.Since(s.lastForcedRestart); since < minForcedRestartGap {
+		return
+	}
+	s.lastForcedRestart = time.Now()
+
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = s.cmd.Process.Kill()
 		s.cmd = nil
@@ -290,13 +422,20 @@ func (s *Server) restartReceiverLocked() {
 		return
 	default:
 		if s.binaryPath != "" {
-			_ = s.startProcessLocked(s.binaryPath)
+			if err := s.startProcessLocked(s.binaryPath); err != nil {
+				log.Printf("[rist] failed to restart ristreceiver: %v", err)
+				s.setUnhealthy(err)
+			}
 		}
 	}
 }
 
 // Close gracefully stops the ristreceiver daemon and cleans up resources.
 func (s *Server) Close() error {
+	s.mu.Lock()
+	s.stopping = true
+	s.mu.Unlock()
+
 	s.cancel()
 
 	s.mu.Lock()

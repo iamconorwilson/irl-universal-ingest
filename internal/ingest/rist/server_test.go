@@ -96,7 +96,7 @@ func TestBuildArgs(t *testing.T) {
 		"-p", "2",
 		"-b", "1500",
 		"-S", "1000",
-		"-v", "4",
+		"-v", "3",
 		"-s", "mysecret123",
 	}
 
