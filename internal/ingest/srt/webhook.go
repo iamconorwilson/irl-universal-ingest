@@ -150,8 +150,8 @@ func (h *WebhookHandler) handleConnect(w http.ResponseWriter, protocol, streamPa
 	h.activeSlot = release
 	h.activePath = streamPath
 
-	// 3. Start relay pulling from local SLS player port with zero loopback buffering
-	playerInputURL := fmt.Sprintf("srt://127.0.0.1:%d?streamid=play%s&latency=20", h.playerPort, streamPath)
+	// 3. Start relay pulling from local SLS player port. 200ms latency is a reasonable default for SRT ingest.
+	playerInputURL := fmt.Sprintf("srt://127.0.0.1:%d?streamid=play%s&latency=200", h.playerPort, streamPath)
 	if _, err := h.relay.StartSession(playerInputURL, streamPath); err != nil {
 		log.Printf("[%s] failed to start relay session: %v", strings.ToLower(protocol), err)
 		release()
