@@ -56,8 +56,7 @@ type Server struct {
 // activityFreshness bounds how long the watchdog stays alive after the last observed traffic line.
 const activityFreshness = 3 * time.Second
 
-// staleDisconnectThreshold: ristreceiver doesn't reliably log a disconnect we can parse, so this
-// is what actually notices a dead stream instead of falling back to the full source_timeout watchdog.
+// staleDisconnectThreshold catches dead streams ristreceiver doesn't log a parseable disconnect for.
 const staleDisconnectThreshold = activityFreshness + 2*time.Second
 
 // restartBaseDelay/restartMaxDelay bound backoff for both unexpected exits and forced restarts.
@@ -121,8 +120,7 @@ func (s *Server) BuildArgs() []string {
 	return args
 }
 
-// ristVerbosity maps our log levels onto ristreceiver's syslog-style -v scale (6=info, 7=debug);
-// anything below INFO silences the connection/stats lines ParseLogLine depends on.
+// ristVerbosity keeps output at INFO or above -- anything lower silences lines ParseLogLine needs.
 func ristVerbosity(logLevel string) string {
 	switch strings.ToLower(logLevel) {
 	case "debug":
@@ -194,8 +192,7 @@ func (s *Server) heartbeatLoop() {
 	}
 }
 
-// heartbeatTick touches the watchdog while activity is fresh, or tears the session down itself
-// once it's gone stale.
+// heartbeatTick touches the watchdog while activity is fresh, or tears down once it's gone stale.
 func (s *Server) heartbeatTick() {
 	s.mu.Lock()
 	active := s.active
@@ -343,7 +340,8 @@ func (s *Server) handleLogLine(line string) {
 		return
 	}
 
-	if metric.Connected || metric.BitrateKbps > 0 || metric.RTTMs > 0 || strings.Contains(line, "data output") || strings.Contains(line, "peer") || strings.Contains(line, "Flow") {
+	// Must match only the start phrasing -- teardown lines share the "data output" substring too.
+	if metric.Connected || metric.HasStats || strings.Contains(line, "Starting data output thread") || strings.Contains(line, "Flow") {
 		s.handleActivity(metric)
 	}
 }

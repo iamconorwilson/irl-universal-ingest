@@ -229,4 +229,4 @@ Returns HTTP 200 `ok` when the server is healthy and accepting streams.
 ## Issues
 
 There will be many, please report them in the issues section.
-Feel free to try this out in your own setup if you think it could be useful. I wouldn't use this for production environments, as it remains not fully tested.
+Feel free to try this out in your own setup if you think it could be useful.

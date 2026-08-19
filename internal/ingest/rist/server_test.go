@@ -26,15 +26,19 @@ func TestParseLogLine(t *testing.T) {
 			},
 		},
 		{
+			// Real captured line: rist_connection_status 2 = RIST_CLIENT_CONNECTED.
 			name: "connected event",
-			line: "2026-08-17 12:00:00 [INFO] Peer 192.168.1.50:5001 connected",
+			line: `1787176093.225970|0.0|[INFO] Connection Status changed for Peer 134442744024176, new status is 2, peer connected count is 1`,
 			expected: StatsMetric{
 				Connected: true,
 			},
 		},
 		{
+			// Real captured line: rist_connection_status 1 = RIST_CONNECTION_TIMED_OUT. The line
+			// itself contains the substring "connected" (from "peer connected count is 0"), which
+			// is exactly what caused a live bug -- a disconnect being misread as fresh activity.
 			name: "disconnected event",
-			line: "2026-08-17 12:05:00 [INFO] Peer disconnected from port 5001",
+			line: `1787176098.560110|0.0|[INFO] Connection Status changed for Peer 134442744024176, new status is 1, peer connected count is 0`,
 			expected: StatsMetric{
 				Disconnected: true,
 			},
@@ -74,6 +78,51 @@ func TestParseLogLine(t *testing.T) {
 	}
 }
 
+// TestParseLogLineJSONStats verifies the real periodic stats JSON is parsed as live activity.
+func TestParseLogLineJSONStats(t *testing.T) {
+	line := `1787172006.256|0.0|[INFO] {"schema_version":4,"receiver-stats":{"flowinstant":{"flow_id":3415714278,"stats":{"quality":100,"lost":2},"peers":[{"id":2,"stats":{"rtt":5.157,"bitrate":563686}}]}}}`
+
+	m := ParseLogLine(line)
+
+	if !m.HasStats {
+		t.Fatalf("expected HasStats=true for a peer stats blob")
+	}
+	if m.RTTMs != 5 {
+		t.Errorf("expected RTTMs 5, got %d", m.RTTMs)
+	}
+	if m.BitrateKbps != 563 {
+		t.Errorf("expected BitrateKbps 563, got %d", m.BitrateKbps)
+	}
+	if m.Quality != 100 {
+		t.Errorf("expected Quality 100, got %f", m.Quality)
+	}
+	if m.LostPackets != 2 {
+		t.Errorf("expected LostPackets 2, got %d", m.LostPackets)
+	}
+}
+
+// TestParseLogLineJSONStatsNoPeers verifies a stats blob with no live peer isn't flagged as activity.
+func TestParseLogLineJSONStatsNoPeers(t *testing.T) {
+	line := `1787172006.256|0.0|[INFO] {"schema_version":4,"receiver-stats":{"flowinstant":{"flow_id":0,"stats":{"quality":0},"peers":[]}}}`
+
+	m := ParseLogLine(line)
+
+	if m.HasStats {
+		t.Errorf("expected HasStats=false when no peers are present")
+	}
+}
+
+// TestParseLogLineJSONStatsDeadFlow reproduces a live bug: a trailing stats blob for a dying flow was misread as fresh activity.
+func TestParseLogLineJSONStatsDeadFlow(t *testing.T) {
+	line := `1787176341.336695|0.0|[INFO] {"schema_version":4,"receiver-stats":{"flowinstant":{"flow_id":1821181200,"dead":1,"profile":1,"profile_name":"main","stats":{"quality":100,"lost":0},"peers":[{"id":2,"dead":1,"url":"rist://@0.0.0.0","stats":{"rtt":5.07,"bitrate":249898}}]}}}`
+
+	m := ParseLogLine(line)
+
+	if m.HasStats {
+		t.Errorf("expected HasStats=false for a stats blob belonging to a dead flow")
+	}
+}
+
 func TestBuildArgs(t *testing.T) {
 	mgr := arbitration.NewManager(5*time.Second, nil)
 	rel := relay.New("udp://127.0.0.1:8888")
@@ -108,6 +157,97 @@ func TestBuildArgs(t *testing.T) {
 		if arg != expectedArgs[i] {
 			t.Errorf("arg[%d] expected %q, got %q", i, expectedArgs[i], arg)
 		}
+	}
+}
+
+// TestStartupLinesDoNotTriggerActivity verifies ristreceiver's own listener-init boilerplate never acquires a slot.
+func TestStartupLinesDoNotTriggerActivity(t *testing.T) {
+	mgr := arbitration.NewManager(5*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+
+	startupLines := []string{
+		`1787175074.928|0.0|[INFO] Starting in Main Profile Mode`,
+		`1787175074.928|0.0|[INFO] Link configured with maxrate=100000 bufmin=1000 bufmax=1000 reorder=15 rttmin=5 rttmax=500 congestion_control=1 min_retries=6 max_retries=20`,
+		`1787175074.928|0.0|[INFO] Encryption is disabled for this peer`,
+		`1787175074.928|0.0|[INFO] URL parsed successfully: Host 0.0.0.0, Port 5001`,
+		`1787175074.928|0.0|[INFO] Peer cname is 3c324c6175a4`,
+		`1787175074.928|0.0|[INFO] New peer with id #0 was configured with maxrate=100000/0 bufmin=1000 bufmax=1000 reorder=15 rttmin=50 rttmax=500 congestion_control=1 min_retries=6 max_retries=20`,
+		`1787175074.928|0.0|[INFO] Initialized Receiver Peer, listening mode ...`,
+		`1787175074.928|0.0|[INFO] Active Peer Information, IP:Port => 0.0.0.0:5001 (1), id: 1, ports: 5001->1969`,
+	}
+	for _, line := range startupLines {
+		server.handleLogLine(line)
+	}
+
+	if _, active := mgr.ActiveInfo(); active {
+		t.Errorf("expected listener startup lines not to acquire a slot")
+	}
+}
+
+// TestDisconnectStatusLineDoesNotReacquire reproduces a live bug: librist's disconnect line contains the substring "connected" and was misread as activity.
+func TestDisconnectStatusLineDoesNotReacquire(t *testing.T) {
+	mgr := arbitration.NewManager(5*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+	defer rel.StopSession()
+
+	server.handleLogLine(`1787176093.225970|0.0|[INFO] Connection Status changed for Peer 134442744024176, new status is 2, peer connected count is 1`)
+	if _, active := mgr.ActiveInfo(); !active {
+		t.Fatalf("expected the connect status line to acquire a slot")
+	}
+
+	server.handleLogLine(`1787176098.560110|0.0|[INFO] Connection Status changed for Peer 134442744024176, new status is 1, peer connected count is 0`)
+	if _, active := mgr.ActiveInfo(); active {
+		t.Errorf("expected the disconnect status line to release the slot, not reacquire it")
+	}
+}
+
+// TestTeardownLinesDoNotReacquire reproduces a live bug: teardown log lines were misread as fresh activity and reacquired the slot mid-teardown.
+func TestTeardownLinesDoNotReacquire(t *testing.T) {
+	mgr := arbitration.NewManager(5*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+	defer rel.StopSession()
+
+	server.handleLogLine(`1787176645.069393|0.0|[WARNING] Listening peer 2 timed out after 279 ms`)
+	if _, active := mgr.ActiveInfo(); active {
+		t.Fatalf("expected the timeout warning to release the slot")
+	}
+
+	teardownLines := []string{
+		`1787176647.243129|0.0|[INFO] {"schema_version":4,"receiver-stats":{"flowinstant":{"flow_id":1165104892,"dead":1,"stats":{"quality":100,"lost":0},"peers":[{"id":2,"dead":1,"stats":{"rtt":4.28,"bitrate":232034}}]}}}`,
+		`1787176647.268673|130218638307344.0|[INFO] 	************** Session Timeout after 2s of no data, deleting flow with id 1165104892 ***************`,
+		`1787176647.268675|130218638307344.0|[INFO] Triggering data output thread termination`,
+		`1787176647.272619|130218638307344.0|[INFO] Data output thread shutting down`,
+	}
+	for _, line := range teardownLines {
+		server.handleLogLine(line)
+	}
+
+	if _, active := mgr.ActiveInfo(); active {
+		t.Errorf("expected teardown lines not to reacquire the slot")
 	}
 }
 
