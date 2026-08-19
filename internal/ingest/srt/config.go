@@ -54,6 +54,10 @@ func GenerateSLSConfig(opts SLSConfigOptions) string {
 	sb.WriteString("    log_summary_enabled 0;\n")
 	sb.WriteString("    log_session_ids 1;\n")
 	fmt.Fprintf(&sb, "    api_keys %s;\n", InternalAPIKey)
+	if opts.StatPostURL != "" {
+		fmt.Fprintf(&sb, "    stat_post_url %s;\n", opts.StatPostURL)
+		sb.WriteString("    stat_post_interval 1;\n")
+	}
 
 	pidFile := "/tmp/sls_server.pid"
 	if opts.PIDFile != "" {
@@ -81,11 +85,6 @@ func GenerateSLSConfig(opts SLSConfigOptions) string {
 
 	if opts.WebhookURL != "" {
 		fmt.Fprintf(&sb, "        on_event_url %s;\n", opts.WebhookURL)
-	}
-
-	if opts.StatPostURL != "" {
-		fmt.Fprintf(&sb, "        stat_post_url %s;\n", opts.StatPostURL)
-		sb.WriteString("        stat_post_interval 1;\n")
 	}
 
 	sb.WriteString("\n        app {\n")
