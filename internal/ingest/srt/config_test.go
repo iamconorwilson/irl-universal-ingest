@@ -15,7 +15,6 @@ func TestGenerateSLSConfig(t *testing.T) {
 		IdleTimeoutSec: 15,
 		Passphrase:     "mysecretpass",
 		WebhookURL:     "http://127.0.0.1:8182/sls/on_event",
-		StatPostURL:    "http://127.0.0.1:8182/sls/stat",
 		LogLevel:       "debug",
 		PIDFile:        "/tmp/test.pid",
 	}
@@ -33,23 +32,12 @@ func TestGenerateSLSConfig(t *testing.T) {
 		"idle_streams_timeout 15;",
 		"srt_passphrase mysecretpass;",
 		"on_event_url http://127.0.0.1:8182/sls/on_event;",
-		"stat_post_url http://127.0.0.1:8182/sls/stat;",
-		"stat_post_interval 1;",
 	}
 
 	for _, d := range expectedDirectives {
 		if !strings.Contains(conf, d) {
 			t.Errorf("expected config to contain %q, got:\n%s", d, conf)
 		}
-	}
-
-	serverStart := strings.Index(conf, "    server {")
-	if serverStart == -1 {
-		t.Fatalf("expected config to contain a server block, got:\n%s", conf)
-	}
-	statIdx := strings.Index(conf, "stat_post_url")
-	if statIdx == -1 || statIdx < serverStart {
-		t.Errorf("expected stat_post_url to be declared inside the server{} block, got:\n%s", conf)
 	}
 }
 
