@@ -4,6 +4,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // SlotInfo contains details about the active ingest session.
@@ -76,7 +78,7 @@ func (m *Manager) TryAcquire(protocol, path string) (bool, func()) {
 
 	decayStop := make(chan struct{})
 	m.decayStop = decayStop
-	go m.decayLoop(decayStop)
+	safego.Go("arbitration.decayLoop", func() { m.decayLoop(decayStop) })
 
 	var once sync.Once
 	release := func() {

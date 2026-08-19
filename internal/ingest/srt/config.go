@@ -37,7 +37,7 @@ func GenerateSLSConfig(opts SLSConfigOptions) string {
 		opts.LatencyMaxMs = 5000
 	}
 	if opts.IdleTimeoutSec <= 0 {
-		opts.IdleTimeoutSec = 10
+		opts.IdleTimeoutSec = 5 // matches config.DefaultSRTIdleTimeoutSec
 	}
 
 	var sb strings.Builder
@@ -56,6 +56,9 @@ func GenerateSLSConfig(opts SLSConfigOptions) string {
 	fmt.Fprintf(&sb, "    api_keys %s;\n", InternalAPIKey)
 	if opts.StatPostURL != "" {
 		fmt.Fprintf(&sb, "    stat_post_url %s;\n", opts.StatPostURL)
+		// Must stay 1: irl-srt-server reads this value in two places with disagreeing units, and
+		// raising it starves the stats cache instead of throttling POSTs (payload comes back
+		// {"stats":[]}, which stops Manager.Touch() firing and reintroduces the forced disconnect).
 		sb.WriteString("    stat_post_interval 1;\n")
 	}
 

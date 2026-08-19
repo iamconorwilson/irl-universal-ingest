@@ -13,6 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
+    curl \
     build-essential \
     cmake \
     pkg-config \
@@ -53,7 +54,7 @@ RUN git clone --depth 1 https://github.com/irlserver/srtla.git /tmp/srtla && \
     rm -rf /tmp/srtla
 
 # Build and install VideoLAN librist (ristreceiver)
-RUN git clone --depth 1 https://code.videolan.org/rist/librist.git /tmp/librist && \
+RUN git clone --depth 1 https://github.com/irlserver/librist.git /tmp/librist && \
     cd /tmp/librist && \
     meson setup build --prefix=/usr/local -Dbuilt_tools=true && \
     ninja -C build install && \
@@ -68,6 +69,10 @@ RUN apt-get purge -y build-essential cmake pkg-config libssl-dev zlib1g-dev meso
 COPY --from=builder /out/irl-ingest /usr/local/bin/irl-ingest
 
 EXPOSE 1935 8080 8890/udp 5000/udp 5001/udp 8888/udp
+
+# Lets an orchestrator with a restart policy notice a wedged process, not just a hard crash.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8080/healthz || exit 1
 
 ENTRYPOINT ["/usr/local/bin/irl-ingest"]
 CMD ["-config", "/app/config.yaml"]

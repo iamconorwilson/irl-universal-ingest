@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/iamconorwilson/irl-universal-ingest/internal/health"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // Server provides the HTTP monitoring endpoint for sidecar scripts.
@@ -47,11 +48,11 @@ func (s *Server) Start() error {
 		return fmt.Errorf("binding stats listener on port %d: %w", s.port, err)
 	}
 
-	go func() {
+	safego.Go("stats.httpServer", func() {
 		if err := s.httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("[stats] server error: %v", err)
 		}
-	}()
+	})
 
 	return nil
 }

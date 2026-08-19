@@ -57,7 +57,7 @@ func main() {
 		HTTPPort:       cfg.SRT.HTTPPort,
 		LatencyMs:      cfg.SRT.LatencyMs,
 		LatencyMaxMs:   cfg.SRT.LatencyMaxMs,
-		IdleTimeoutSec: int(cfg.SourceTimeout.Seconds()),
+		IdleTimeoutSec: cfg.SRT.IdleTimeoutSec,
 		Passphrase:     cfg.SRT.Passphrase,
 		LogLevel:       cfg.LogLevel,
 		AllowedPaths:   cfg.Auth.AllowedPaths,

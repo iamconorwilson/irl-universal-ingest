@@ -199,9 +199,6 @@ func (h *WebhookHandler) handleStatsPush(w http.ResponseWriter, bodyBytes []byte
 
 	metric, err := ParseStats(bodyBytes, slot.Path)
 	if err == nil && metric.Found {
-		if metric.RTTMs > 0 {
-			h.manager.SetRTT(metric.RTTMs)
-		}
 		if metric.BitrateKbps > 0 {
 			h.manager.SetBitrate(metric.BitrateKbps)
 		}

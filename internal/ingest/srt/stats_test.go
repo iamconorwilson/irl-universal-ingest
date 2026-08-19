@@ -5,54 +5,48 @@ import (
 )
 
 func TestParseStats(t *testing.T) {
-	rawJSON := `{
-		"status": "ok",
-		"publishers": {
-			"publish/live/stream": {
-				"bitrate": 6500,
-				"rtt": 28.5,
-				"latency": 2000,
-				"uptime": 12
-			}
-		}
-	}`
+	// Real stat_post_url payload shape, captured live -- distinct from GET /stats' "publishers" map.
+	rawJSON := `{"stats":[
+		{"kbitrate":0,"port":8190,"pub_domain_app":"","remote_ip":"","remote_port":0,"role":"listener-player","start_time":"2026-08-19 20:17:39","stream_name":"","url":""},
+		{"kbitrate":0,"port":8891,"pub_domain_app":"","remote_ip":"","remote_port":0,"role":"listener-publisher-srtla","start_time":"2026-08-19 20:17:39","stream_name":"","url":""},
+		{"kbitrate":0,"port":8890,"pub_domain_app":"","remote_ip":"","remote_port":0,"role":"listener-publisher","start_time":"2026-08-19 20:17:39","stream_name":"","url":""},
+		{"kbitrate":514,"port":8890,"pub_domain_app":"publish/live","remote_ip":"::ffff:127.0.0.1","remote_port":60707,"role":"publisher","start_time":"2026-08-19 20:17:53","stream_name":"stream","url":"publish/live/stream"}
+	]}`
 
 	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
 	if err != nil {
 		t.Fatalf("unexpected error parsing stats: %v", err)
 	}
 
-	if metric.BitrateKbps != 6500 {
-		t.Errorf("expected BitrateKbps 6500, got %d", metric.BitrateKbps)
+	if !metric.Found {
+		t.Fatalf("expected Found=true for an active publisher entry")
 	}
-	if metric.RTTMs != 28.5 {
-		t.Errorf("expected RTTMs 28.5, got %f", metric.RTTMs)
+	if metric.BitrateKbps != 514 {
+		t.Errorf("expected BitrateKbps 514, got %d", metric.BitrateKbps)
 	}
 }
 
-func TestParseStatsSLSResponse(t *testing.T) {
-	liveJSON := `{"publishers":{"publish/live/stream":{"bitrate":7760,"bytesRcvDrop":0,"bytesRcvLoss":0,"ingestDiscontinuities":0,"latency":2000,"maxReaderBacklogBytes":2444,"maxReaderBacklogMs":2,"mbpsBandwidth":266.016,"mbpsRecvRate":8.44003095190265,"msRcvBuf":1998,"pktRcvDrop":0,"pktRcvLoss":0,"pktRcvRetrans":0,"pktRecvNAKTotal":0,"pktRetransTotal":0,"pktSentNAKTotal":0,"ringOverruns":0,"rtt":8.775,"sendBackpressure":0,"uptime":3,"viewerPktSndDrop":0}},"status":"ok"}`
+func TestParseStatsIgnoresNonPublisherRoles(t *testing.T) {
+	// Listener/player entries must never be mistaken for a live publisher.
+	rawJSON := `{"stats":[
+		{"kbitrate":0,"port":8190,"role":"listener-player","stream_name":"","url":""},
+		{"kbitrate":0,"port":8890,"role":"listener-publisher","stream_name":"","url":""}
+	]}`
 
-	metric, err := ParseStats([]byte(liveJSON), "/live/stream")
+	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
 	if err != nil {
-		t.Fatalf("unexpected error parsing live sls stats: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	if metric.BitrateKbps != 7760 {
-		t.Errorf("expected BitrateKbps 7760, got %d", metric.BitrateKbps)
-	}
-	if metric.RTTMs != 8.775 {
-		t.Errorf("expected RTTMs 8.775, got %f", metric.RTTMs)
+	if metric.Found {
+		t.Errorf("expected Found=false when no role=\"publisher\" entry is present")
 	}
 }
 
 func TestParseStatsExactMatchNotSubstring(t *testing.T) {
 	// Must not match via substring containment against a longer publisher path.
-	rawJSON := `{
-		"publishers": {
-			"publish/live/stream2": {"bitrate": 3000, "rtt": 10}
-		}
-	}`
+	rawJSON := `{"stats":[
+		{"kbitrate":3000,"role":"publisher","stream_name":"stream2","url":"publish/live/stream2"}
+	]}`
 
 	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
 	if err != nil {
@@ -67,7 +61,7 @@ func TestParseStatsExactMatchNotSubstring(t *testing.T) {
 }
 
 func TestParseStatsNotFoundWhenAbsent(t *testing.T) {
-	rawJSON := `{"publishers": {}}`
+	rawJSON := `{"stats": []}`
 
 	metric, err := ParseStats([]byte(rawJSON), "/live/stream")
 	if err != nil {

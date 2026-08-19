@@ -16,6 +16,7 @@ import (
 	"github.com/iamconorwilson/irl-universal-ingest/internal/auth"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/health"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // ServerOptions contains configuration parameters for the RIST ingest supervisor.
@@ -54,6 +55,10 @@ type Server struct {
 
 // activityFreshness bounds how long the watchdog stays alive after the last observed traffic line.
 const activityFreshness = 3 * time.Second
+
+// staleDisconnectThreshold: ristreceiver doesn't reliably log a disconnect we can parse, so this
+// is what actually notices a dead stream instead of falling back to the full source_timeout watchdog.
+const staleDisconnectThreshold = activityFreshness + 2*time.Second
 
 // restartBaseDelay/restartMaxDelay bound backoff for both unexpected exits and forced restarts.
 const (
@@ -116,17 +121,18 @@ func (s *Server) BuildArgs() []string {
 	return args
 }
 
-// ristVerbosity maps the configured log level onto ristreceiver's -v verbosity scale.
+// ristVerbosity maps our log levels onto ristreceiver's syslog-style -v scale (6=info, 7=debug);
+// anything below INFO silences the connection/stats lines ParseLogLine depends on.
 func ristVerbosity(logLevel string) string {
 	switch strings.ToLower(logLevel) {
 	case "debug":
-		return "4"
+		return "7"
 	case "warn", "warning":
-		return "2"
+		return "4"
 	case "error":
-		return "1"
-	default: // "info" and anything unrecognized
 		return "3"
+	default: // "info" and anything unrecognized
+		return "6"
 	}
 }
 
@@ -166,7 +172,7 @@ func (s *Server) Start() error {
 	s.mu.Unlock()
 
 	s.wg.Add(1)
-	go s.heartbeatLoop()
+	safego.Go("rist.heartbeatLoop", s.heartbeatLoop)
 
 	return nil
 }
@@ -183,15 +189,31 @@ func (s *Server) heartbeatLoop() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.Lock()
-			active := s.active
-			fresh := active && time.Since(s.lastActivity) <= activityFreshness
-			s.mu.Unlock()
-
-			if fresh && s.opts.Relay.IsRunning() {
-				s.opts.Manager.Touch()
-			}
+			s.heartbeatTick()
 		}
+	}
+}
+
+// heartbeatTick touches the watchdog while activity is fresh, or tears the session down itself
+// once it's gone stale.
+func (s *Server) heartbeatTick() {
+	s.mu.Lock()
+	active := s.active
+	silence := time.Since(s.lastActivity)
+	fresh := active && silence <= activityFreshness
+	stale := active && silence > staleDisconnectThreshold
+	if stale {
+		s.stopActiveStreamLocked()
+	}
+	s.mu.Unlock()
+
+	if stale {
+		log.Printf("[rist] no activity for %s, treating stream as disconnected", silence.Round(time.Second))
+		return
+	}
+
+	if fresh && s.opts.Relay.IsRunning() {
+		s.opts.Manager.Touch()
 	}
 }
 
@@ -219,9 +241,9 @@ func (s *Server) startProcessLocked(binaryPath string) error {
 	log.Printf("[rist] started ristreceiver daemon on port %d (PID %d, player port %d)", s.opts.RISTPort, cmd.Process.Pid, s.opts.PlayerPort)
 
 	s.wg.Add(3)
-	go s.monitorOutput(stdout)
-	go s.monitorOutput(stderr)
-	go s.reapProcess(cmd)
+	safego.Go("rist.monitorOutput.stdout", func() { s.monitorOutput(stdout) })
+	safego.Go("rist.monitorOutput.stderr", func() { s.monitorOutput(stderr) })
+	safego.Go("rist.reapProcess", func() { s.reapProcess(cmd) })
 
 	return nil
 }
@@ -333,14 +355,21 @@ func (s *Server) handleActivity(metric StatsMetric) {
 
 	s.lastActivity = time.Now()
 
-	streamPath := s.lastCNAME
-	if streamPath == "" {
-		if s.activePath != "" {
-			streamPath = s.activePath
-		} else if len(s.opts.AllowedPaths) > 0 {
-			streamPath = s.opts.AllowedPaths[0]
-		} else {
-			streamPath = "/live/stream"
+	// ristreceiver never surfaces a client-supplied stream key, so with a single allowed path
+	// there's nothing to disambiguate against; route to it directly rather than matching cname.
+	var streamPath string
+	if len(s.opts.AllowedPaths) == 1 {
+		streamPath = s.opts.AllowedPaths[0]
+	} else {
+		streamPath = s.lastCNAME
+		if streamPath == "" {
+			if s.activePath != "" {
+				streamPath = s.activePath
+			} else if len(s.opts.AllowedPaths) > 0 {
+				streamPath = s.opts.AllowedPaths[0]
+			} else {
+				streamPath = "/live/stream"
+			}
 		}
 	}
 	streamPath = auth.NormalizePath(streamPath)
@@ -351,6 +380,15 @@ func (s *Server) handleActivity(metric StatsMetric) {
 		s.stopActiveStreamLocked()
 		s.restartReceiverLocked()
 		return
+	}
+
+	// Resync in case the manager's own watchdog released the slot without going through us.
+	if s.active {
+		if _, managerActive := s.opts.Manager.ActiveInfo(); !managerActive {
+			s.active = false
+			s.activeSlot = nil
+			s.activePath = ""
+		}
 	}
 
 	// 2. Claim arbitration slot if not yet active

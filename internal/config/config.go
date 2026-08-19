@@ -27,7 +27,12 @@ type SRTConfig struct {
 	Passphrase   string `yaml:"passphrase"`
 	PlayerPort   int    `yaml:"player_port"`
 	HTTPPort     int    `yaml:"http_port"`
+	// IdleTimeoutSec sets irl-srt-server's idle_streams_timeout, independent of source_timeout.
+	IdleTimeoutSec int `yaml:"idle_timeout_sec"`
 }
+
+// DefaultSRTIdleTimeoutSec bounds how long a dead SRT publisher's last frame lingers downstream.
+const DefaultSRTIdleTimeoutSec = 5
 
 // SRTLAConfig encapsulates SRTLA receiver proxy settings.
 type SRTLAConfig struct {
@@ -81,12 +86,13 @@ func Default() *Config {
 			Port: 1935,
 		},
 		SRT: SRTConfig{
-			Port:         8890,
-			LatencyMs:    200,
-			LatencyMaxMs: 5000,
-			Passphrase:   "",
-			PlayerPort:   8190,
-			HTTPPort:     8181,
+			Port:           8890,
+			LatencyMs:      200,
+			LatencyMaxMs:   5000,
+			Passphrase:     "",
+			PlayerPort:     8190,
+			HTTPPort:       8181,
+			IdleTimeoutSec: DefaultSRTIdleTimeoutSec,
 		},
 		SRTLA: SRTLAConfig{
 			Port: 5000,

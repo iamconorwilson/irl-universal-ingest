@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // restartBaseDelay and restartMaxDelay bound the backoff for auto-restarting ffmpeg after an unexpected exit.
@@ -137,7 +139,7 @@ func (r *Relay) startLocked(input, path string) (io.WriteCloser, error) {
 	r.stdinPipe = stdin
 	r.running = true
 
-	go r.watch(cmd, done, mySession)
+	safego.Go("relay.watch", func() { r.watch(cmd, done, mySession) })
 
 	return stdin, nil
 }

@@ -8,6 +8,7 @@ srt:
   # passphrase: ""
   # player_port: 8190
   # http_port: 8181
+  # idle_timeout_sec: 5
 
 srtla:
   port: 5000

@@ -15,6 +15,7 @@ import (
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/health"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // ServerOptions encapsulates settings for the SRT ingest adapter.
@@ -88,10 +89,10 @@ func (s *Server) Start() error {
 	}
 
 	s.wg.Add(1)
-	go func() {
+	safego.Go("srt.webhookServer", func() {
 		defer s.wg.Done()
 		_ = s.webhookServer.Serve(listener)
-	}()
+	})
 
 	// 2. Prepare temporary configuration file
 	tempDir, err := os.MkdirTemp("", "irl-sls-*")

@@ -15,6 +15,7 @@ import (
 	"github.com/iamconorwilson/irl-universal-ingest/internal/arbitration"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/auth"
 	"github.com/iamconorwilson/irl-universal-ingest/internal/relay"
+	"github.com/iamconorwilson/irl-universal-ingest/internal/safego"
 )
 
 // rtmpReadIdleTimeout bounds how long a half-open connection can block streamToRelay's read.
@@ -62,7 +63,7 @@ func (s *Server) Start() error {
 	s.listener = l
 
 	s.wg.Add(1)
-	go s.acceptLoop()
+	safego.Go("rtmp.acceptLoop", s.acceptLoop)
 
 	return nil
 }
@@ -101,10 +102,10 @@ func (s *Server) acceptLoop() {
 		consecutiveErrors = 0
 
 		s.wg.Add(1)
-		go func(c net.Conn) {
+		safego.Go("rtmp.handleConn", func() {
 			defer s.wg.Done()
-			s.handleConn(c)
-		}(conn)
+			s.handleConn(conn)
+		})
 	}
 }
 

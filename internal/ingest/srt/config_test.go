@@ -60,8 +60,8 @@ func TestGenerateSLSConfigDefaults(t *testing.T) {
 	if !strings.Contains(conf, "latency_max 5000;") {
 		t.Errorf("expected default latency_max 5000, got:\n%s", conf)
 	}
-	if !strings.Contains(conf, "idle_streams_timeout 10;") {
-		t.Errorf("expected default idle_streams_timeout 10, got:\n%s", conf)
+	if !strings.Contains(conf, "idle_streams_timeout 5;") {
+		t.Errorf("expected default idle_streams_timeout 5, got:\n%s", conf)
 	}
 	if !strings.Contains(conf, "log_file /tmp/srt_server.log;") {
 		t.Errorf("expected default log_file in /tmp, got:\n%s", conf)

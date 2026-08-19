@@ -96,7 +96,7 @@ func TestBuildArgs(t *testing.T) {
 		"-p", "2",
 		"-b", "1500",
 		"-S", "1000",
-		"-v", "3",
+		"-v", "6",
 		"-s", "mysecret123",
 	}
 
@@ -111,7 +111,8 @@ func TestBuildArgs(t *testing.T) {
 	}
 }
 
-func TestAuthAndArbitration(t *testing.T) {
+// TestSinglePathIgnoresCNAME verifies a single allowed path is used regardless of cname.
+func TestSinglePathIgnoresCNAME(t *testing.T) {
 	mgr := arbitration.NewManager(5*time.Second, nil)
 	rel := relay.New("udp://127.0.0.1:8888")
 
@@ -123,20 +124,13 @@ func TestAuthAndArbitration(t *testing.T) {
 		Relay:        rel,
 	})
 
-	// Unauthorized path should be rejected and not acquire slot
-	server.handleLogLine("[STATS] cname: /unauthorized/path, rtt: 20ms, bitrate: 3000kbps")
-
-	_, active := mgr.ActiveInfo()
-	if active {
-		t.Errorf("expected unauthorized stream to be rejected")
-	}
-
-	// Authorized path should acquire slot
-	server.handleLogLine("[STATS] cname: /live/stream, rtt: 25ms, bitrate: 4500kbps")
+	// Real ristreceiver output: an auto-generated cname, then the JSON stats blob.
+	server.handleLogLine("1787172006.207785|0.0|[INFO] Authenticated RTCP peer 2 and flow 1076884258 for connection with cname: 3c324c6175a4")
+	server.handleLogLine(`1787172006.256|0.0|[INFO] {"schema_version":4,"receiver-stats":{"flowinstant":{"flow_id":1,"stats":{"bitrate":0},"peers":[{"id":2,"stats":{"rtt":5.2,"bitrate":450000}}]}}}`)
 
 	slot, active := mgr.ActiveInfo()
 	if !active {
-		t.Fatalf("expected authorized stream to acquire slot")
+		t.Fatalf("expected the single configured path to acquire a slot despite a non-matching cname")
 	}
 	if slot.Protocol != "RIST" {
 		t.Errorf("expected protocol RIST, got %s", slot.Protocol)
@@ -150,5 +144,110 @@ func TestAuthAndArbitration(t *testing.T) {
 	_, active = mgr.ActiveInfo()
 	if active {
 		t.Errorf("expected slot to be released on disconnect")
+	}
+}
+
+// TestHeartbeatTickDetectsStaleStream verifies a session is torn down once activity goes stale.
+func TestHeartbeatTickDetectsStaleStream(t *testing.T) {
+	mgr := arbitration.NewManager(30*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+
+	// Simulate an acquired, previously-active stream that has since gone silent.
+	acquired, release := mgr.TryAcquire("RIST", "/live/stream")
+	if !acquired {
+		t.Fatalf("failed to seed an active slot")
+	}
+	server.active = true
+	server.activeSlot = release
+	server.activePath = "/live/stream"
+	server.lastActivity = time.Now().Add(-(staleDisconnectThreshold + time.Second))
+
+	server.heartbeatTick()
+
+	if server.active {
+		t.Errorf("expected heartbeatTick to clear active state once silence exceeds staleDisconnectThreshold")
+	}
+	if _, active := mgr.ActiveInfo(); active {
+		t.Errorf("expected heartbeatTick to release the arbitration slot")
+	}
+}
+
+// TestHeartbeatTickResyncsAfterManagerRelease verifies local state resyncs after the manager
+// releases a slot on its own.
+func TestHeartbeatTickResyncsAfterManagerRelease(t *testing.T) {
+	mgr := arbitration.NewManager(5*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+	defer rel.StopSession()
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+
+	acquired, release := mgr.TryAcquire("RIST", "/live/stream")
+	if !acquired {
+		t.Fatalf("failed to seed an active slot")
+	}
+	server.active = true
+	server.activeSlot = release
+	server.activePath = "/live/stream"
+
+	// Mirrors the manager's own watchdog releasing the slot without going through us.
+	release()
+
+	server.handleActivity(StatsMetric{Connected: true})
+
+	slot, active := mgr.ActiveInfo()
+	if !active {
+		t.Fatalf("expected handleActivity to re-acquire a slot after resync")
+	}
+	if slot.Path != "/live/stream" {
+		t.Errorf("expected path /live/stream, got %s", slot.Path)
+	}
+}
+
+// TestMultiPathUsesCNAME verifies cname routes connections when multiple paths are allowed.
+func TestMultiPathUsesCNAME(t *testing.T) {
+	mgr := arbitration.NewManager(5*time.Second, nil)
+	rel := relay.New("udp://127.0.0.1:8888")
+
+	server := NewServer(ServerOptions{
+		RISTPort:     5001,
+		PlayerPort:   5101,
+		AllowedPaths: []string{"/live/stream", "/live/backup"},
+		Manager:      mgr,
+		Relay:        rel,
+	})
+	defer rel.StopSession()
+
+	// A cname that doesn't match either configured path should be rejected.
+	server.handleLogLine("1787172006.1|0.0|[INFO] Authenticated RTCP peer 2 and flow 1 for connection with cname: /unauthorized/path")
+	server.handleLogLine(`1787172006.2|0.0|[INFO] {"receiver-stats":{"flowinstant":{"stats":{"bitrate":0},"peers":[{"stats":{"rtt":5.2,"bitrate":450000}}]}}}`)
+
+	if _, active := mgr.ActiveInfo(); active {
+		t.Errorf("expected unauthorized cname to be rejected when multiple paths are configured")
+	}
+
+	// A cname matching a configured path should acquire the slot.
+	server.handleLogLine("1787172007.1|0.0|[INFO] Authenticated RTCP peer 2 and flow 2 for connection with cname: /live/backup")
+	server.handleLogLine(`1787172007.2|0.0|[INFO] {"receiver-stats":{"flowinstant":{"stats":{"bitrate":0},"peers":[{"stats":{"rtt":5.2,"bitrate":450000}}]}}}`)
+
+	slot, active := mgr.ActiveInfo()
+	if !active {
+		t.Fatalf("expected authorized cname to acquire slot")
+	}
+	if slot.Path != "/live/backup" {
+		t.Errorf("expected path /live/backup, got %s", slot.Path)
 	}
 }

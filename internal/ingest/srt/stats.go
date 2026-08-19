@@ -15,26 +15,24 @@ type StreamMetric struct {
 	Found bool `json:"-"`
 }
 
-// SLSStatsResponse represents the JSON payload from irl-srt-server /stats.
-type SLSStatsResponse struct {
-	Status     string                      `json:"status"`
-	Publishers map[string]SLSPublisherStat `json:"publishers"`
+// SLSStatsPushPayload is the JSON body irl-srt-server POSTs to stat_post_url -- a flat array of
+// per-connection entries, distinct from the "publishers" map the /stats HTTP endpoint returns.
+type SLSStatsPushPayload struct {
+	Stats []SLSStatEntry `json:"stats"`
 }
 
-// SLSPublisherStat represents a single publisher entry in the SLS stats.
-type SLSPublisherStat struct {
-	Bitrate      int64   `json:"bitrate"`
-	RTT          float64 `json:"rtt"`
-	Latency      int64   `json:"latency"`
-	Uptime       int64   `json:"uptime"`
-	MbpsBandwith float64 `json:"mbpsBandwidth"`
-	MbpsRecvRate float64 `json:"mbpsRecvRate"`
+// SLSStatEntry represents a single connection/role entry in a stat_post_url payload.
+type SLSStatEntry struct {
+	Role       string `json:"role"`
+	StreamName string `json:"stream_name"`
+	URL        string `json:"url"`
+	KbitRate   int64  `json:"kbitrate"`
 }
 
-// ParseStats extracts stream metrics matching the targetStreamID from raw SLS JSON output.
+// ParseStats extracts stream metrics matching the targetStreamID from a stat_post_url payload.
 func ParseStats(data []byte, targetStreamID string) (*StreamMetric, error) {
-	var resp SLSStatsResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	var payload SLSStatsPushPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, fmt.Errorf("decoding sls stats json: %w", err)
 	}
 
@@ -43,10 +41,12 @@ func ParseStats(data []byte, targetStreamID string) (*StreamMetric, error) {
 	}
 
 	normalizedTarget := normalizePublisherKey(targetStreamID)
-	for key, pub := range resp.Publishers {
-		if normalizePublisherKey(key) == normalizedTarget {
-			metric.BitrateKbps = pub.Bitrate
-			metric.RTTMs = pub.RTT
+	for _, entry := range payload.Stats {
+		if entry.Role != "publisher" {
+			continue
+		}
+		if normalizePublisherKey(entry.URL) == normalizedTarget {
+			metric.BitrateKbps = entry.KbitRate
 			metric.Found = true
 			return metric, nil
 		}
